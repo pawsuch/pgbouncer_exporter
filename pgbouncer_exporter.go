@@ -14,35 +14,22 @@
 package main
 
 import (
-	"fmt"
 	"net/http"
 	"os"
 
-	"github.com/go-kit/log/level"
+	"github.com/alecthomas/kingpin/v2"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
+	versioncollector "github.com/prometheus/client_golang/prometheus/collectors/version"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-	"github.com/prometheus/common/promlog"
-	"github.com/prometheus/common/promlog/flag"
+	"github.com/prometheus/common/promslog"
+	"github.com/prometheus/common/promslog/flag"
 	"github.com/prometheus/common/version"
-	"gopkg.in/alecthomas/kingpin.v2"
+	"github.com/prometheus/exporter-toolkit/web"
+	"github.com/prometheus/exporter-toolkit/web/kingpinflag"
 )
 
-const (
-	namespace = "pgbouncer"
-	indexHTML = `
-	<html>
-		<head>
-			<title>PgBouncer Exporter</title>
-		</head>
-		<body>
-			<h1>PgBouncer Exporter</h1>
-			<p>
-			<a href='%s'>Metrics</a>
-			</p>
-		</body>
-	</html>`
-)
+const namespace = "pgbouncer"
 
 func main() {
 	const pidFileHelpText = `Path to PgBouncer pid file.
@@ -54,29 +41,34 @@ func main() {
 
 	https://prometheus.io/docs/instrumenting/writing_clientlibs/#process-metrics.`
 
-	promlogConfig := &promlog.Config{}
-	flag.AddFlags(kingpin.CommandLine, promlogConfig)
+	promslogConfig := &promslog.Config{}
+	flag.AddFlags(kingpin.CommandLine, promslogConfig)
 
 	var (
-		connectionStringPointer = kingpin.Flag("pgBouncer.connectionString", "Connection string for accessing pgBouncer.").Default("postgres://postgres:@localhost:6543/pgbouncer?sslmode=disable").String()
-		listenAddress           = kingpin.Flag("web.listen-address", "Address on which to expose metrics and web interface.").Default(":9127").String()
+		connectionStringPointer = kingpin.Flag("pgBouncer.connectionString", "Connection string for accessing pgBouncer.").Default("postgres://postgres:@localhost:6543/pgbouncer?sslmode=disable").Envar("PGBOUNCER_EXPORTER_CONNECTION_STRING").String()
 		metricsPath             = kingpin.Flag("web.telemetry-path", "Path under which to expose metrics.").Default("/metrics").String()
 		pidFilePath             = kingpin.Flag("pgBouncer.pid-file", pidFileHelpText).Default("").String()
 	)
+
+	toolkitFlags := kingpinflag.AddFlags(kingpin.CommandLine, ":9127")
 
 	kingpin.Version(version.Print("pgbouncer_exporter"))
 	kingpin.HelpFlag.Short('h')
 	kingpin.Parse()
 
-	logger := promlog.New(promlogConfig)
+	logger := promslog.New(promslogConfig)
+
+	logger.Info("Starting pgbouncer_exporter", "version", version.Info())
+	logger.Info("Build context", "build_context", version.BuildContext())
 
 	connectionString := *connectionStringPointer
 	exporter := NewExporter(connectionString, namespace, logger)
+	if exporter == nil {
+		logger.Error("Failed to create exporter")
+		os.Exit(1)
+	}
 	prometheus.MustRegister(exporter)
-	prometheus.MustRegister(version.NewCollector("pgbouncer_exporter"))
-
-	level.Info(logger).Log("msg", "Starting pgbouncer_exporter", "version", version.Info())
-	level.Info(logger).Log("msg", "Build context", "build_context", version.BuildContext())
+	prometheus.MustRegister(versioncollector.NewCollector("pgbouncer_exporter"))
 
 	if *pidFilePath != "" {
 		procExporter := collectors.NewProcessCollector(
@@ -89,13 +81,29 @@ func main() {
 	}
 
 	http.Handle(*metricsPath, promhttp.Handler())
-	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(fmt.Sprintf(indexHTML, *metricsPath)))
-	})
+	if *metricsPath != "/" && *metricsPath != "" {
+		landingConfig := web.LandingConfig{
+			Name:        "PgBouncer Exporter",
+			Description: "Prometheus Exporter for PgBouncer servers",
+			Version:     version.Info(),
+			Links: []web.LandingLinks{
+				{
+					Address: *metricsPath,
+					Text:    "Metrics",
+				},
+			},
+		}
+		landingPage, err := web.NewLandingPage(landingConfig)
+		if err != nil {
+			logger.Error("Error creating landing page", "err", err)
+			os.Exit(1)
+		}
+		http.Handle("/", landingPage)
+	}
 
-	level.Info(logger).Log("msg", "Listening on", "address", *listenAddress)
-	if err := http.ListenAndServe(*listenAddress, nil); err != nil {
-		level.Error(logger).Log("err", err)
+	srv := &http.Server{}
+	if err := web.ListenAndServe(srv, toolkitFlags, logger); err != nil {
+		logger.Error("Error starting server", "err", err)
 		os.Exit(1)
 	}
 }

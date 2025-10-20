@@ -15,10 +15,11 @@ package main
 
 // Elasticsearch Node Stats Structs
 import (
-	"database/sql"
 	"fmt"
+	"log/slog"
 
-	"github.com/go-kit/log"
+	"github.com/lib/pq"
+
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -53,7 +54,7 @@ func stringTocolumnUsage(s string) (u columnUsage, err error) {
 }
 
 // Implements the yaml.Unmarshaller interface
-func (this *columnUsage) UnmarshalYAML(unmarshal func(interface{}) error) error {
+func (cu *columnUsage) UnmarshalYAML(unmarshal func(interface{}) error) error {
 	var value string
 	if err := unmarshal(&value); err != nil {
 		return err
@@ -64,7 +65,7 @@ func (this *columnUsage) UnmarshalYAML(unmarshal func(interface{}) error) error 
 		return err
 	}
 
-	*this = columnUsage
+	*cu = columnUsage
 	return nil
 }
 
@@ -102,9 +103,7 @@ type ColumnMapping struct {
 // Exporter collects PgBouncer stats from the given server and exports
 // them using the prometheus metrics package.
 type Exporter struct {
+	conn      *pq.Connector
 	metricMap map[string]MetricMapNamespace
-
-	db *sql.DB
-
-	logger log.Logger
+	logger    *slog.Logger
 }
